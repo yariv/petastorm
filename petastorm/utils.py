@@ -14,6 +14,9 @@
 
 import logging
 import os
+
+import pyarrow
+
 from multiprocessing import Pool
 
 import pyarrow
