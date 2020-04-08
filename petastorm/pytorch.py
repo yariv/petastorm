@@ -134,11 +134,14 @@ class DataLoader(object):
             # We can not know what is the reasonable number to use for the extra capacity, so we set a huge number
             # and give up on the unbound growth protection mechanism.
             min_after_dequeue = shuffling_queue_capacity - 1
-            self._shuffling_buffer = RandomShufflingBuffer(shuffling_queue_capacity,
-                                                           min_after_retrieve=min_after_dequeue,
-                                                           extra_capacity=100000000)
+            self._shuffling_buffer = RandomShufflingBuffer(
+                shuffling_queue_capacity,
+                min_after_retrieve=min_after_dequeue,
+                extra_capacity=100000000,
+                batch_size=batch_size
+            )
         else:
-            self._shuffling_buffer = NoopShufflingBuffer()
+            self._shuffling_buffer = NoopShufflingBuffer(batch_size=batch_size)
 
     def __iter__(self):
         """
@@ -181,8 +184,8 @@ class DataLoader(object):
             yield batch
 
     def _yield_batches(self, keys):
-        while self._shuffling_buffer.can_retrieve(self.batch_size):
-            batch = self._shuffling_buffer.retrieve(self.batch_size)
+        while self._shuffling_buffer.can_retrieve():
+            batch = self._shuffling_buffer.retrieve()
             yield batch
 
     # Functions needed to treat data loader as a context manager

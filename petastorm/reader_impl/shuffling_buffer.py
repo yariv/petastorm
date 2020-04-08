@@ -23,18 +23,43 @@ import torch
 class ShufflingBufferBase(object):
     """Shuffling implements a shuffling algorithm. Items can be added to the shuffling buffer and removed in a
     different order as defined by the concrete shuffling algorithm. A shuffling buffer is intended to be used from
-    a single thread, hence, not thread safe."""
+    a single thread, hence, not thread safe. """
+
+    def __init__(self, batch_size=1):
+        self._keys = None
+        self.batch_size = batch_size
+
+    def add_many(self, items):
+        if isinstance(items, dict):
+            if self._keys is None:
+                self._keys = list(items.keys())
+            items = [items[k] for k in self._keys]
+        items = [torch.as_tensor(i) for i in items]
+        if items[0].shape == ():
+            # single value buffer
+            self._keys = ""
+            items = [torch.stack(items, 0)]
+
+        return self._add_many(items)
 
     @abc.abstractmethod
-    def add_many(self, items):
+    def _add_many(self, items):
         """Adds multiple items to the buffer.
 
         :param items: items to be added to the shuffling buffer.
         :return: None
         """
 
-    @abc.abstractmethod
     def retrieve(self):
+        sample = self._retrieve()
+        if self._keys is not None:
+            if self._keys == "":
+                return sample[0].item()
+            return {k: v for k, v in zip(self._keys, sample)}
+        return sample
+
+    @abc.abstractmethod
+    def _retrieve(self):
         """Selects an item from the buffer and returns the item to the caller. The item is removed from the buffer.
 
         :return: The selected item.
@@ -77,16 +102,33 @@ class NoopShufflingBuffer(ShufflingBufferBase):
     as test scenarios or iterating over a dataset in a predeterministic order.
     """
 
-    def __init__(self):
+    def __init__(self, batch_size=1):
+        super().__init__(batch_size=batch_size)
+        self._batches = []
+        self._num_samples = 0
         self.store = deque()
 
-    def add_many(self, items):
-        self.store.extend(items)
+    def _make_batch(self):
+        batch = [torch.cat(b, 0) for b in self._batches]
+        if self._num_samples > self.batch_size:
+            leftover = [b[self.batch_size:] for b in batch]
+            batch = [b[:self.batch_size] for b in batch]
+            self._batches = [leftover]
+        else:
+            self._batches = []
+        self._num_samples -= min(self._num_samples, self.batch_size)
+        self.store.append(batch)
 
-    def retrieve(self, batch_size=1):
+    def _add_many(self, items):
+        self._num_samples += len(items[0])
+        self._batches.append(items)
+        while self._num_samples >= self.batch_size:
+            self._make_batch()
+
+    def _retrieve(self):
         return self.store.popleft()
 
-    def can_retrieve(self, batch_size=1):
+    def can_retrieve(self):
         return len(self.store) > 0
 
     def can_add(self):
@@ -97,7 +139,8 @@ class NoopShufflingBuffer(ShufflingBufferBase):
         return len(self.store)
 
     def finish(self):
-        pass
+        if self._batches:
+            self._make_batch()
 
 
 class RandomShufflingBuffer(ShufflingBufferBase):
@@ -105,7 +148,7 @@ class RandomShufflingBuffer(ShufflingBufferBase):
     A random shuffling buffer implementation. Items can be added to the buffer and retrieved in a random order.
     """
 
-    def __init__(self, shuffling_buffer_capacity, min_after_retrieve, extra_capacity=1000):
+    def __init__(self, shuffling_buffer_capacity, min_after_retrieve, extra_capacity=1000, batch_size=1):
         """Initializes a new ShufflingBuffer instance.
 
         Items may be retrieved from the buffer once ``min_after_retrieve`` items were added to the queue
@@ -129,6 +172,7 @@ class RandomShufflingBuffer(ShufflingBufferBase):
           set to the upper bound of the number of items that can be added in a single call to :func:`add_many` (can be a
           loose bound).
         """
+        super().__init__(batch_size=batch_size)
         self._extra_capacity = extra_capacity
         # Preallocate the shuffling buffer.
         self._items = None
@@ -141,17 +185,7 @@ class RandomShufflingBuffer(ShufflingBufferBase):
         self._random_indices = None
         self._sampling_size = 0
 
-    def add_many(self, items):
-        if isinstance(items, dict):
-            if self._keys is None:
-                self._keys = list(items.keys())
-            items = [items[k] for k in self._keys]
-        items = [torch.as_tensor(i) for i in items]
-        if items[0].shape == ():
-            # single value buffer
-            self._keys = ""
-            items = [torch.stack(items, 0)]
-
+    def _add_many(self, items):
         if self._done_adding:
             raise RuntimeError('Can not call add_many after done_adding() was called.')
 
@@ -191,11 +225,11 @@ class RandomShufflingBuffer(ShufflingBufferBase):
             self._items[k][self._size:expected_size] = v
         self._size = expected_size
 
-    def retrieve(self, batch_size=1):
+    def _retrieve(self):
         if not self._done_adding and not self.can_retrieve():
             raise RuntimeError('Can not dequeue. Check the return value of "can_dequeue()" to check if any '
                                'items are available.')
-        batch_size = min(batch_size, self._size)
+        batch_size = min(self.batch_size, self._size)
 
         if self._random_indices is None:
             self._sampling_size = 0
@@ -207,17 +241,13 @@ class RandomShufflingBuffer(ShufflingBufferBase):
             # Clone is required because pytorch doesn't always make a copy
             sample.append(v[idx])
         self._size -= batch_size
-        if self._keys is not None:
-            if self._keys == "":
-                return sample[0].item()
-            return {k: v for k, v in zip(self._keys, sample)}
         return sample
 
-    def can_add(self, batch_size=1):
-        return self._size <= self._shuffling_queue_capacity - batch_size and not self._done_adding
+    def can_add(self):
+        return self._size <= self._shuffling_queue_capacity - self.batch_size and not self._done_adding
 
-    def can_retrieve(self, batch_size=1):
-        return self._size >= self._min_after_dequeue + batch_size - 1 or (self._done_adding and self._size > 0)
+    def can_retrieve(self):
+        return self._size >= self._min_after_dequeue + self.batch_size - 1 or (self._done_adding and self._size > 0)
 
     @property
     def size(self):
