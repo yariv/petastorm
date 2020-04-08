@@ -109,7 +109,8 @@ class NoopShufflingBuffer(ShufflingBufferBase):
         self.store = deque()
 
     def _make_batch(self):
-        batch = [torch.cat(b, 0) for b in self._batches]
+        # TODO: Add test for the zip
+        batch = [torch.cat(b, 0) for b in zip(*self._batches)]
         if self._num_samples > self.batch_size:
             leftover = [b[self.batch_size:] for b in batch]
             batch = [b[:self.batch_size] for b in batch]
